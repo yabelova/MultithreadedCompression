@@ -1,0 +1,10 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs
+/Multithreading/MultithreadedCompression/obj
+/Multithreading/MultithreadedCompression/CompressorOne.cs
+/Multithreading/.vs/Multithreading/v16
+/Multithreading/MultithreadedCompression/bin/Debug
+*.user
