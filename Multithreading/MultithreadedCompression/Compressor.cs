@@ -1,77 +1,144 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
+using System.IO.Compression;
 
 namespace MultithreadedCompression
 {
-    class Compressor
+    internal sealed class Compressor : BaseProcessor
     {
-        public void Compress(string source, string destination)
+        internal Compressor(string source, string destination) : base(source, Helper.GetCompressedFileNameWithExtension(destination))
         {
-            destination = GetCompressedFileNameWithExtension(destination);
-            long sourceLength = new System.IO.FileInfo(source).Length;
-            var metadata = new Metadata(GetSourceFileExtension(source), sourceLength);
+        }
 
-            var pool = new MyThreadPool();
-            pool.StartCompressThreadPool(sourceLength, source);
-
-            using (FileStream destinationStream = File.Create(destination))
+        internal override int Run()
+        {
+            try
             {
-                destinationStream.Seek(metadata.MetadataSize, SeekOrigin.Begin);
+                var watch = System.Diagnostics.Stopwatch.StartNew();
 
-                while (pool.IsAlive() || pool.BufferToWrite.Count > 0)
+                //Initializing
+                if (string.Equals(SourceFileName, DestinationFileName))
+                    throw new WrongCallException("Source and destination files can not be the same.");
+                long sourceLength = new FileInfo(SourceFileName).Length;
+                base.Metadata = new Metadata(SourceFileName, sourceLength);
+                var compressThreadCount = Helper.GetCompressThreadsCount(sourceLength);
+                var queueLength = Helper.GetMaxTaskQueueLength(compressThreadCount);
+
+                PositionToRead = new SharingPosition(0, sourceLength, Settings.ChunkSizeBytes);
+                QueueToWrite = new SharingTaskQueue<Task>(compressThreadCount, queueLength);
+
+                //Start work
+                base.StartStatusThread("Compressing", 100 / Math.Ceiling((double)sourceLength / Settings.ChunkSizeBytes));
+                base.StartProcessThreads(compressThreadCount, "ReaderCompressor", StartReadAndCompress);
+                StartWrite();
+
+                //Finish work
+                ExecutionStatus.FinishStatus(true);
+                base.JoinProcessThreads();
+                base.JoinStatusThread();
+
+                watch.Stop();
+
+                Console.WriteLine($"Compressed {SourceFileName} to {DestinationFileName} in {watch.Elapsed.ToString("g")}");
+                return 0;
+            }
+            catch (WrongCallException ex)
+            {
+                base.AbortAllThreads();
+                Console.WriteLine(ex.Message);
+            }
+            catch (Exception ex)
+            {
+                base.AbortAllThreads();
+                Console.WriteLine("Error while compressing: " + ex.Message);
+            }
+            finally
+            {
+                if (ExecutionStatus != null && ExecutionStatus.GetStatus() < 100)
+                    File.Delete(DestinationFileName);
+            }
+            return 1;
+        }
+
+        private void StartWrite()
+        {
+            //var threadName = Thread.CurrentThread.Name ?? "Main";
+            //Console.WriteLine($"{threadName} start");
+            using (var destinationStream = new FileStream(DestinationFileName, FileMode.Create, FileAccess.Write))
+            {
+                try
                 {
-                    byte[] buffer = null;
-                    long offset = 0;
-                    int size = 0;
-                    lock (pool.LockerBufferToWrite)
+                    destinationStream.Seek(Metadata.MetadataSize, SeekOrigin.Begin);
+
+                    while (true)
                     {
-                        if (pool.BufferToWrite.Count > 0)
+                        var task = QueueToWrite.Dequeue();
+                        if (task == null)
+                            break;
+                        if (task.RethrowException != null)
+                            throw new Exception(task.RethrowException);
+                        //Console.WriteLine($"{threadName} writing {task.UncompressedOffset}");
+
+                        Metadata.AddChunk(destinationStream.Position, task.UncompressedOffset);
+                        destinationStream.Write(task.Buffer, 0, task.Buffer.Length);
+                        ExecutionStatus.IncrementStatus();
+                    }
+                    destinationStream.Seek(0, SeekOrigin.Begin);
+                    destinationStream.Write(Metadata.GetBytes(), 0, Metadata.MetadataSize);
+                }
+                catch (Exception ex)
+                {
+                    destinationStream.Flush(false);
+                    throw new Exception(ex.Message);
+                }
+            }
+            //Console.WriteLine($"{threadName} end");
+        }
+
+        private void StartReadAndCompress()
+        {
+            //var threadName = Thread.CurrentThread.Name ?? "";
+            //Console.WriteLine($"{threadName} start");
+            using (var sourceStream = new FileStream(SourceFileName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                try
+                {
+                    var maxPosition = sourceStream.Length;
+                    byte[] buffer = new byte[Settings.ChunkSizeBytes];
+
+                    while (true)
+                    {
+                        var currentPosition = PositionToRead.GetLastPositionAndIncrement();
+                        if (currentPosition < 0)
+                            break;
+                        //Console.WriteLine($"{threadName} processing {currentPosition}");
+
+                        var chunkSize = (int)Math.Min(Settings.ChunkSizeBytes, maxPosition - currentPosition);
+                        sourceStream.Seek(currentPosition, SeekOrigin.Begin);
+                        sourceStream.Read(buffer, 0, chunkSize);
+                        using (MemoryStream ms = new MemoryStream())
                         {
-                            //Console.WriteLine(pool.BufferToWrite.Count+" "+ pool.BufferToWrite.Count*Settings.ChunkSizeBytes);
-                            offset = pool.BufferToWrite.First().Key;
-                            buffer = pool.BufferToWrite.First().Value;
-                            size = pool.BufferToWrite.First().Value.Length;
-                            pool.BufferToWrite.Remove(offset);
+                            using (GZipStream gs = new GZipStream(ms, CompressionMode.Compress))
+                                gs.Write(buffer, 0, chunkSize);
+
+                            QueueToWrite.Enqueue(new Task(currentPosition, ms.ToArray()));
                         }
                     }
-
-                    if (buffer!=null)
-                    {
-                        metadata.AddChunk(destinationStream.Position, offset);
-                        destinationStream.Write(buffer, 0, size);
-                        //Console.WriteLine(string.Intern("Write ") + offset);
-                    }
                 }
-
-                destinationStream.Seek(0, SeekOrigin.Begin);
-                var metadataBytes = metadata.GetBytes();
-                destinationStream.Write(metadataBytes, 0, metadata.MetadataSize);
-                destinationStream.Close();
+                catch (OutOfMemoryException)
+                {
+                    QueueToWrite.Enqueue(new Task("There is no enough memory to continue"));
+                }
+                catch (Exception ex)
+                {
+                    QueueToWrite.Enqueue(new Task(ex.Message));
+                }
+                finally
+                {
+                    QueueToWrite.FinishEnqueue();
+                }
             }
-            Console.WriteLine($"Compressed {source} to {destination}");
-        }
-
-        /// <summary>
-        /// Get compressed file name with extension
-        /// </summary>
-        /// <param name="destinationName">file name entered</param>
-        /// <returns>file name with extension</returns>
-        private string GetCompressedFileNameWithExtension(string destinationName)
-        {
-            return destinationName.EndsWith(Settings.CompressedExtension)
-                ? destinationName
-                : destinationName + Settings.CompressedExtension;
-        }
-
-        /// <summary>
-        /// Get source file extension for compressing
-        /// </summary>
-        /// <param name="sourceName">source file name</param>
-        /// <returns>source extension</returns>
-        private string GetSourceFileExtension(string sourceName)
-        {
-            return sourceName.Remove(0, sourceName.LastIndexOf('.'));
+            //Console.WriteLine($"{threadName} end");
         }
     }
 }

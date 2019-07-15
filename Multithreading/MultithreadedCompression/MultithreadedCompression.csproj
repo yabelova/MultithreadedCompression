@@ -43,15 +43,17 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="MyThreadPool.cs" />
+    <Compile Include="BaseProcessor.cs" />
     <Compile Include="Compressor.cs" />
-    <Compile Include="CompressorOne.cs" />
     <Compile Include="Decompressor.cs" />
+    <Compile Include="Helper.cs" />
     <Compile Include="Metadata.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="SharingExecutionStatus.cs" />
+    <Compile Include="SharingPosition.cs" />
     <Compile Include="Settings.cs" />
-    <Compile Include="UnitTest.cs" />
+    <Compile Include="SharingTaskQueue.cs" />
     <Compile Include="WrongSourceFileException.cs" />
     <Compile Include="WrongCallException.cs" />
   </ItemGroup>
